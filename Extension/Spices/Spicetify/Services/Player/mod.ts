@@ -14,7 +14,7 @@ import {
 	SpotifyPlayer, SpotifyPlatform, SpotifyURI, SpotifyRequestBuilder,
 	GetSpotifyAccessToken
 } from "../Session.ts"
-import { GetExpireStore } from '../Cache.ts'
+import { GetExpireStore, GetInstantStore } from '../Cache.ts'
 
 // Our Modules
 import {
@@ -345,6 +345,127 @@ const TransformedLyricsStore = GetExpireStore<TransformedLyrics | false>(
 	true
 )
 
+// LRCLIB Fallback Settings
+const LrclibSettingsStore = GetInstantStore<{ Enabled: boolean }>(
+	"BeautifulLyrics/LrclibFallback", 1,
+	{ Enabled: false }
+)
+export const GetLrclibFallbackEnabled = (): boolean => LrclibSettingsStore.Items.Enabled
+export const SetLrclibFallbackEnabled = (enabled: boolean): void => {
+	LrclibSettingsStore.Items.Enabled = enabled
+	LrclibSettingsStore.SaveChanges()
+}
+
+// LRCLIB API Types & Helper
+type LrclibResponse = {
+	id: number;
+	trackName: string;
+	artistName: string;
+	albumName: string;
+	duration: number;
+	instrumental: boolean;
+	plainLyrics: string | null;
+	syncedLyrics: string | null;
+}
+
+const ParseLrclibSyncedLyrics = (syncedLyrics: string): ProviderLyrics | undefined => {
+	// Parse LRC format: [mm:ss.xx] lyrics
+	const lines: { StartTime: number; EndTime: number; Text: string; OppositeAligned: boolean }[] = []
+	const lrcLines = syncedLyrics.split('\n').filter(line => line.trim().length > 0)
+
+	for (const line of lrcLines) {
+		const match = line.match(/^\[(\d{2}):(\d{2})\.(\d{2,3})\]\s*(.*)$/)
+		if (match) {
+			const minutes = parseInt(match[1], 10)
+			const seconds = parseInt(match[2], 10)
+			const milliseconds = parseInt(match[3].padEnd(3, '0'), 10)
+			const text = match[4].trim()
+
+			if (text.length > 0) {
+				lines.push({
+					StartTime: minutes * 60 + seconds + milliseconds / 1000,
+					EndTime: 0, // Will be calculated below
+					Text: text,
+					OppositeAligned: false
+				})
+			}
+		}
+	}
+
+	if (lines.length === 0) {
+		return undefined
+	}
+
+	// Calculate EndTime for each line (start of next line, or +3s for last line)
+	for (let i = 0; i < lines.length; i++) {
+		lines[i].EndTime = (i < lines.length - 1) ? lines[i + 1].StartTime : (lines[i].StartTime + 3)
+	}
+
+	return {
+		Type: "Line",
+		StartTime: lines[0].StartTime,
+		EndTime: lines[lines.length - 1].EndTime,
+		Content: lines.map(line => ({
+			Type: "Vocal" as const,
+			StartTime: line.StartTime,
+			EndTime: line.EndTime,
+			Text: line.Text,
+			OppositeAligned: line.OppositeAligned
+		}))
+	}
+}
+
+const ParseLrclibPlainLyrics = (plainLyrics: string): ProviderLyrics | undefined => {
+	const lines = plainLyrics.split('\n').filter(line => line.trim().length > 0)
+	if (lines.length === 0) {
+		return undefined
+	}
+
+	return {
+		Type: "Static",
+		Lines: lines.map(line => ({ Text: line.trim() }))
+	}
+}
+
+const FetchLrclibLyrics = (
+	trackName: string, artistName: string, albumName: string, duration: number
+): Promise<ProviderLyrics | undefined> => {
+	const params = new URLSearchParams({
+		track_name: trackName,
+		artist_name: artistName,
+		album_name: albumName,
+		duration: Math.round(duration).toString()
+	})
+
+	return fetch(`https://lrclib.net/api/get?${params.toString()}`, {
+		method: "GET",
+		headers: {
+			"User-Agent": "BeautifulLyrics (https://github.com/surfbryce/beautiful-lyrics)"
+		}
+	})
+	.then(response => {
+		if (!response.ok) {
+			return undefined
+		}
+		return response.json() as Promise<LrclibResponse>
+	})
+	.then(data => {
+		if (!data) {
+			return undefined
+		}
+
+		// Prefer synced lyrics over plain lyrics
+		if (data.syncedLyrics) {
+			return ParseLrclibSyncedLyrics(data.syncedLyrics)
+		} else if (data.plainLyrics) {
+			return ParseLrclibPlainLyrics(data.plainLyrics)
+		}
+
+		return undefined
+	})
+	.catch(() => undefined)
+}
+
 export let SongLyrics: (TransformedLyrics | undefined) = undefined
 export let HaveSongLyricsLoaded: boolean = false
 const LoadSongLyrics = () => {
@@ -425,7 +546,63 @@ const LoadSongLyrics = () => {
 		)
 		.then(
 			([storedProviderLyrics, storedTransformedLyrics]): Promise<TransformedLyrics | undefined> => {
-				// If we do not have anything stored for our transformed-lyrics then we need to generate it
+				// Check if we should try LRCLIB fallback
+				const shouldTryLrclib = (
+					LrclibSettingsStore.Items.Enabled
+					&& HaveSongDetailsLoaded
+					&& SongDetails
+					&& (
+						// No lyrics at all
+						storedProviderLyrics === false
+						// Or only static (unsynced) lyrics
+						|| (storedProviderLyrics !== false && storedProviderLyrics.Type === "Static")
+					)
+				)
+
+				// If we should try LRCLIB, attempt fallback
+				if (shouldTryLrclib && SongDetails) {
+					const trackName = SongDetails.Name
+					const artistName = SongDetails.IsLocal
+						? (SongDetails.Artists?.[0] ?? "")
+						: SongDetails.Artists[0]?.Name ?? ""
+					const albumName = SongDetails.IsLocal
+						? SongDetails.Album
+						: (SongDetails.Raw?.album?.name ?? "")
+					const duration = songAtUpdate.Duration
+
+					return FetchLrclibLyrics(trackName, artistName, albumName, duration)
+						.then(lrclibLyrics => {
+							// Use LRCLIB lyrics only if better than current
+							if (lrclibLyrics) {
+								const currentIsSynced = (storedProviderLyrics !== false && storedProviderLyrics.Type !== "Static")
+								const lrclibIsSynced = (lrclibLyrics.Type !== "Static")
+
+								// Use LRCLIB if: no current lyrics, OR current is static and LRCLIB has synced
+								if (storedProviderLyrics === false || (!currentIsSynced && lrclibIsSynced)) {
+									return TransformProviderLyrics(lrclibLyrics)
+										.then(transformedLyrics => {
+											// Don't cache LRCLIB results to main store (keep separate)
+											return transformedLyrics || undefined
+										})
+								}
+							}
+
+							// Fall back to original logic
+							if (storedTransformedLyrics === undefined) {
+								return (
+									(storedProviderLyrics === false) ? Promise.resolve<false>(false)
+									: TransformProviderLyrics(storedProviderLyrics)
+								).then(transformedLyrics => {
+									TransformedLyricsStore.SetItem(songAtUpdate.Id, transformedLyrics)
+									return transformedLyrics || undefined
+								})
+							} else {
+								return Promise.resolve(storedTransformedLyrics || undefined)
+							}
+						})
+				}
+
+				// Original logic when LRCLIB fallback is disabled or not needed
 				if (storedTransformedLyrics === undefined) {
 					return (
 						(
