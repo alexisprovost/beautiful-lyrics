@@ -20,7 +20,8 @@ import {
 } from "@Spices/Spicetify/Services/Session.ts"
 import {
 	Song, SongChanged,
-	SongLyrics, SongLyricsLoaded, HaveSongLyricsLoaded
+	SongLyrics, SongLyricsLoaded, HaveSongLyricsLoaded,
+	RefreshCurrentLyrics
 } from "@Spices/Spicetify/Services/Player/mod.ts"
 
 // Components
@@ -37,6 +38,15 @@ const ViewMaid = GlobalMaid.Give(new Maid())
 
 // Template Constants
 const LoadingLyricsCard = `<div class="LoadingLyricsCard Loading"></div>`
+const NoLyricsCard = `
+	<div class="NoLyricsCard">
+		<span>No lyrics available</span>
+		<button class="RefreshLyrics">
+			<svg role="img" height="16" width="16" aria-hidden="true" viewBox="0 0 16 16"><path d="M0 4.75A3.75 3.75 0 0 1 3.75 1h8.5A3.75 3.75 0 0 1 16 4.75v5a3.75 3.75 0 0 1-3.75 3.75H9.81l1.018 1.018a.75.75 0 1 1-1.06 1.06L6.939 12.75l2.829-2.828a.75.75 0 1 1 1.06 1.06L9.811 12h2.439a2.25 2.25 0 0 0 2.25-2.25v-5a2.25 2.25 0 0 0-2.25-2.25h-8.5A2.25 2.25 0 0 0 1.5 4.75v5A2.25 2.25 0 0 0 3.75 12H5v1.5H3.75A3.75 3.75 0 0 1 0 9.75v-5z"></path></svg>
+			Retry
+		</button>
+	</div>
+`
 
 // DOM Search Constants
 const CurrentMainPage = ".Root__main-view .main-view-container div[data-overlayscrollbars-viewport]"
@@ -182,13 +192,24 @@ OnSpotifyReady
 					// We shouldn't be rendering the card-view when we have another of our views open
 					SpotifyHistory.location.pathname.startsWith("/BeautifulLyrics")
 					|| (Song === undefined)
-					|| (HaveSongLyricsLoaded && (SongLyrics === undefined))
 				) {
 					nowPlayingViewMaid.Clean("Card")
 					return
 				} else if (HaveSongLyricsLoaded === false) { // Render a template if we're still loading our lyrics
 					const card = nowPlayingViewMaid.Give(CreateElement<HTMLDivElement>(LoadingLyricsCard), "Card")
 					cardAnchor.after(card)
+
+					return
+				} else if (SongLyrics === undefined) { // No lyrics found - show refresh option
+					const card = nowPlayingViewMaid.Give(CreateElement<HTMLDivElement>(NoLyricsCard), "Card")
+					cardAnchor.after(card)
+					
+					const refreshBtn = card.querySelector<HTMLButtonElement>(".RefreshLyrics")
+					if (refreshBtn) {
+						refreshBtn.addEventListener("click", () => {
+							RefreshCurrentLyrics()
+						})
+					}
 
 					return
 				}
@@ -220,6 +241,21 @@ OnSpotifyReady
 			// Handle when we should check
 			contentsContainerMaid.Give(SongChanged.Connect(DeferCheckForNowPlaying))
 
+			// Poll for the Now Playing widget until found (max 10 seconds)
+			// This handles the case where the widget loads after initial check
+			let pollAttempts = 0
+			const pollInterval = setInterval(() => {
+				pollAttempts++
+				const cardAnchor = contentsContainer!.querySelector<HTMLDivElement>(CardInsertAnchor)
+				if (cardAnchor !== null) {
+					clearInterval(pollInterval)
+					CheckForNowPlaying()
+				} else if (pollAttempts >= 20) { // 20 * 500ms = 10 seconds
+					clearInterval(pollInterval)
+				}
+			}, 500)
+			contentsContainerMaid.Give(() => clearInterval(pollInterval))
+
 		}
 		const DeferCheckForContentsContainer = () => ViewMaid.Give(Defer(CheckForContentsContainer), "CheckForContentsContainer")
 
@@ -248,6 +284,22 @@ OnSpotifyReady
 					sidebarChildObserver.observe(element, { childList: true })
 				}
 			}
+
+			// Also poll for widget at sidebar level as a fallback
+			let sidebarPollAttempts = 0
+			const sidebarPollInterval = setInterval(() => {
+				sidebarPollAttempts++
+				// Try to find the card anchor directly in the sidebar
+				const cardAnchor = sidebar.querySelector<HTMLDivElement>(CardInsertAnchor)
+				if (cardAnchor !== null) {
+					clearInterval(sidebarPollInterval)
+					// Re-check contents container which will find and setup the widget
+					CheckForContentsContainer()
+				} else if (sidebarPollAttempts >= 40) { // 40 * 250ms = 10 seconds
+					clearInterval(sidebarPollInterval)
+				}
+			}, 250)
+			ViewMaid.Give(() => clearInterval(sidebarPollInterval))
 		}
 		CheckForSidebar()
 	}

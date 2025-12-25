@@ -12,6 +12,7 @@
 	background-color: var(--background-tinted-base) !important;
 	border-radius: 8px;
 	padding: 16px;
+	overflow: visible;
 
 	-ms-flex-direction: column;
 	flex-direction: column;
@@ -131,7 +132,7 @@
 		-webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 16px, var(--spice-sidebar) 24px, var(--spice-sidebar) calc(100% - 64px), transparent calc(100% - 16px), transparent);
 		mask-image: linear-gradient(180deg, transparent 0, transparent 16px, var(--spice-sidebar) 24px, var(--spice-sidebar) calc(100% - 64px), transparent calc(100% - 16px), transparent);
 
-		overflow: hidden;
+		overflow: visible;
 
 		margin: -16px;
 

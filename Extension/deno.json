@@ -1,7 +1,8 @@
 {
 	"tasks": {
 		"test": "deno run --allow-read --allow-run --allow-net --allow-env --allow-write ./Tasks/Test.ts",
-		"release": "deno run --allow-read --allow-run --allow-net --allow-env --allow-write ./Tasks/Release.ts"
+		"release": "deno run --allow-read --allow-run --allow-net --allow-env --allow-write ./Tasks/Release.ts",
+		"store-locally": "deno run --allow-read --allow-run --allow-net --allow-env --allow-write ./Tasks/StoreLocally.ts"
 	},
 
 	"compilerOptions": {

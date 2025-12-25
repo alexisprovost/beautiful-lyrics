@@ -348,7 +348,17 @@ const TransformedLyricsStore = GetExpireStore<TransformedLyrics | false>(
 // LRCLIB Fallback Settings
 const LrclibSettingsStore = GetInstantStore<{ Enabled: boolean }>(
 	"BeautifulLyrics/LrclibFallback", 1,
-	{ Enabled: false }
+	{ Enabled: true }
+)
+
+// LRCLIB Lyrics Cache (separate from main API cache)
+const LrclibLyricsCache = GetExpireStore<ProviderLyrics | false>(
+	"Player_LrclibLyrics", 1,
+	{
+		Duration: 1,
+		Unit: "Months"
+	},
+	true
 )
 export const GetLrclibFallbackEnabled = (): boolean => LrclibSettingsStore.Items.Enabled
 export const SetLrclibFallbackEnabled = (enabled: boolean): void => {
@@ -427,43 +437,112 @@ const ParseLrclibPlainLyrics = (plainLyrics: string): ProviderLyrics | undefined
 	}
 }
 
-const FetchLrclibLyrics = (
+const FetchLrclibLyrics = async (
 	trackName: string, artistName: string, albumName: string, duration: number
 ): Promise<ProviderLyrics | undefined> => {
-	const params = new URLSearchParams({
-		track_name: trackName,
-		artist_name: artistName,
-		album_name: albumName,
-		duration: Math.round(duration).toString()
-	})
+	// Normalize function for comparing names (remove special chars, lowercase)
+	const normalizeStrict = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '')
+	const normalizedSearchArtist = normalizeStrict(artistName)
+	const normalizedSearchTrack = normalizeStrict(trackName)
 
-	return fetch(`https://lrclib.net/api/get?${params.toString()}`, {
-		method: "GET",
-		headers: {
-			"User-Agent": "BeautifulLyrics (https://github.com/surfbryce/beautiful-lyrics)"
-		}
-	})
-	.then(response => {
-		if (!response.ok) {
-			return undefined
-		}
-		return response.json() as Promise<LrclibResponse>
-	})
-	.then(data => {
-		if (!data) {
-			return undefined
-		}
+	// Score results for best match
+	const scoreResults = (results: LrclibResponse[]) => {
+		const scored = results.map(r => {
+			const normalizedResultArtist = normalizeStrict(r.artistName)
+			const normalizedResultTrack = normalizeStrict(r.trackName)
+			
+			let score = 0
+			
+			// Artist match scoring
+			if (normalizedResultArtist === normalizedSearchArtist) {
+				score += 100 // Exact match
+			} else if (normalizedResultArtist.includes(normalizedSearchArtist) || normalizedSearchArtist.includes(normalizedResultArtist)) {
+				score += 50 // Partial match
+			}
+			
+			// Track name match scoring
+			if (normalizedResultTrack === normalizedSearchTrack) {
+				score += 100 // Exact match
+			} else if (normalizedResultTrack.includes(normalizedSearchTrack) || normalizedSearchTrack.includes(normalizedResultTrack)) {
+				score += 50 // Partial match
+			}
+			
+			// Duration match scoring (within 5 seconds = good)
+			const durationDiff = Math.abs(r.duration - duration)
+			if (durationDiff <= 2) {
+				score += 30
+			} else if (durationDiff <= 5) {
+				score += 20
+			} else if (durationDiff <= 10) {
+				score += 10
+			}
+			
+			// Synced lyrics bonus
+			if (r.syncedLyrics) {
+				score += 25
+			}
+			
+			return { result: r, score }
+		})
 
-		// Prefer synced lyrics over plain lyrics
-		if (data.syncedLyrics) {
-			return ParseLrclibSyncedLyrics(data.syncedLyrics)
-		} else if (data.plainLyrics) {
-			return ParseLrclibPlainLyrics(data.plainLyrics)
-		}
+		// Filter to only include results with reasonable match (at least track matched somewhat)
+		return scored.filter(s => s.score >= 50).sort((a, b) => b.score - a.score)
+	}
 
-		return undefined
-	})
-	.catch(() => undefined)
+	// Try different search strategies
+	const searchStrategies = [
+		// Strategy 1: Full search with track + artist
+		{ track_name: trackName, artist_name: artistName },
+		// Strategy 2: Track + album only (for artists with special chars)
+		{ track_name: trackName, album_name: albumName },
+		// Strategy 3: Track name only
+		{ track_name: trackName },
+		// Strategy 4: Track + artist with q parameter (broader search)
+		{ q: `${trackName} ${artistName}` }
+	]
+
+	for (const params of searchStrategies) {
+		const searchParams = new URLSearchParams(params as Record<string, string>)
+		const strategyDesc = Object.entries(params).map(([k, v]) => `${k}="${v}"`).join(', ')
+		
+		try {
+			const response = await fetch(`https://lrclib.net/api/search?${searchParams.toString()}`, {
+				method: "GET",
+				headers: {
+					"User-Agent": "BeautifulLyrics (https://github.com/surfbryce/beautiful-lyrics)"
+				}
+			})
+
+			if (!response.ok) {
+				continue
+			}
+
+			const results = await response.json() as LrclibResponse[]
+			if (!results || results.length === 0) {
+				continue
+			}
+
+			const validMatches = scoreResults(results)
+			if (validMatches.length === 0) {
+				continue
+			}
+
+			const best = validMatches[0].result
+			console.log(`[Beautiful Lyrics] LRCLIB search (${strategyDesc}) found ${results.length} results, ${validMatches.length} valid, selected: "${best.trackName}" by ${best.artistName} (${best.syncedLyrics ? 'Synced' : 'Plain'}, score: ${validMatches[0].score})`)
+
+			// Prefer synced lyrics over plain lyrics
+			if (best.syncedLyrics) {
+				return ParseLrclibSyncedLyrics(best.syncedLyrics)
+			} else if (best.plainLyrics) {
+				return ParseLrclibPlainLyrics(best.plainLyrics)
+			}
+		} catch {
+			continue
+		}
+	}
+
+	console.log(`[Beautiful Lyrics] LRCLIB: No lyrics found after trying all search strategies`)
+	return undefined
 }
 
 export let SongLyrics: (TransformedLyrics | undefined) = undefined
@@ -523,6 +602,13 @@ const LoadSongLyrics = () => {
 								}
 							)
 						)
+						.catch(
+							(error) => {
+								// Log the error but don't throw - return undefined to trigger LRCLIB fallback
+								console.warn("Beautiful Lyrics: Primary lyrics fetch failed:", error)
+								return undefined
+							}
+						)
 						.then(
 							(providerLyrics) => {
 								const lyrics = (providerLyrics ?? false)
@@ -547,6 +633,7 @@ const LoadSongLyrics = () => {
 		.then(
 			([storedProviderLyrics, storedTransformedLyrics]): Promise<TransformedLyrics | undefined> => {
 				// Check if we should try LRCLIB fallback
+				const currentLyricsType = (storedProviderLyrics !== false) ? storedProviderLyrics.Type : null
 				const shouldTryLrclib = (
 					LrclibSettingsStore.Items.Enabled
 					&& HaveSongDetailsLoaded
@@ -554,8 +641,10 @@ const LoadSongLyrics = () => {
 					&& (
 						// No lyrics at all
 						storedProviderLyrics === false
-						// Or only static (unsynced) lyrics
-						|| (storedProviderLyrics !== false && storedProviderLyrics.Type === "Static")
+						// Or only static (unsynced) lyrics - try to get synced
+						|| currentLyricsType === "Static"
+						// Or only line-synced - try to get syllable-synced
+						|| currentLyricsType === "Line"
 					)
 				)
 
@@ -570,21 +659,55 @@ const LoadSongLyrics = () => {
 						: (SongDetails.Raw?.album?.name ?? "")
 					const duration = songAtUpdate.Duration
 
-					return FetchLrclibLyrics(trackName, artistName, albumName, duration)
-						.then(lrclibLyrics => {
-							// Use LRCLIB lyrics only if better than current
-							if (lrclibLyrics) {
-								const currentIsSynced = (storedProviderLyrics !== false && storedProviderLyrics.Type !== "Static")
-								const lrclibIsSynced = (lrclibLyrics.Type !== "Static")
-
-								// Use LRCLIB if: no current lyrics, OR current is static and LRCLIB has synced
-								if (storedProviderLyrics === false || (!currentIsSynced && lrclibIsSynced)) {
-									return TransformProviderLyrics(lrclibLyrics)
-										.then(transformedLyrics => {
-											// Don't cache LRCLIB results to main store (keep separate)
-											return transformedLyrics || undefined
-										})
+					// Check LRCLIB cache first
+					return LrclibLyricsCache.GetItem(songAtUpdate.Id)
+						.then(cachedLrclibLyrics => {
+							// If we have cached LRCLIB result, use it (false means we checked and found nothing useful)
+							if (cachedLrclibLyrics !== undefined) {
+								if (cachedLrclibLyrics === false) {
+									console.log(`[Beautiful Lyrics] LRCLIB cache hit: no useful lyrics for this track`)
+									return undefined
 								}
+								console.log(`[Beautiful Lyrics] LRCLIB cache hit: using cached ${cachedLrclibLyrics.Type} lyrics`)
+								return cachedLrclibLyrics
+							}
+							// Not in cache, fetch from API
+							return FetchLrclibLyrics(trackName, artistName, albumName, duration)
+								.then(lrclibLyrics => {
+									// Cache the result (false if nothing useful found)
+									const lrclibType = lrclibLyrics?.Type
+									const shouldUseLrclib = lrclibLyrics && (
+										storedProviderLyrics === false
+										|| (currentLyricsType === "Static" && lrclibType !== "Static")
+										|| (currentLyricsType === "Line" && lrclibType === "Syllable")
+									)
+									
+									if (shouldUseLrclib && lrclibLyrics) {
+										LrclibLyricsCache.SetItem(songAtUpdate.Id, lrclibLyrics)
+									} else {
+										// Cache that we checked but found nothing better
+										LrclibLyricsCache.SetItem(songAtUpdate.Id, false)
+									}
+									
+									return shouldUseLrclib ? lrclibLyrics : undefined
+								})
+						})
+						.then(lrclibLyrics => {
+							// Use LRCLIB lyrics if we got them from cache or API
+							if (lrclibLyrics) {
+								console.log(`[Beautiful Lyrics] Using LRCLIB lyrics (${lrclibLyrics.Type}) instead of main API (${currentLyricsType || "none"})`)
+								return TransformProviderLyrics(lrclibLyrics)
+									.then(transformedLyrics => {
+										// Cache the transformed LRCLIB lyrics too
+										if (transformedLyrics) {
+											TransformedLyricsStore.SetItem(songAtUpdate.Id, transformedLyrics)
+										}
+										return transformedLyrics || undefined
+									})
+									.catch(err => {
+										console.error(`[Beautiful Lyrics] Error transforming LRCLIB lyrics:`, err)
+										return undefined
+									})
 							}
 
 							// Fall back to original logic
@@ -628,15 +751,42 @@ const LoadSongLyrics = () => {
 			transformedLyrics => {
 				// Make sure we still have the same song active
 				if (Song !== songAtUpdate) {
+					console.log(`[Beautiful Lyrics] Song changed during lyrics loading, ignoring result`)
 					return
 				}
 
 				// Update our lyrics
+				console.log(`[Beautiful Lyrics] Setting SongLyrics with type: ${transformedLyrics?.Type || "undefined"}`)
 				SongLyrics = transformedLyrics, HaveSongLyricsLoaded = true
 				SongLyricsLoadedSignal.Fire()
 			}
 		)
 	}
+}
+
+// Clear lyrics cache for current song and reload
+export const RefreshCurrentLyrics = async (): Promise<void> => {
+	const currentSong = Song
+	if (currentSong === undefined || currentSong.Type !== "Streamed") {
+		return
+	}
+	
+	// Clear all caches for this song by deleting the cache entries
+	const songId = currentSong.Id
+	try {
+		const cacheNames = ['Player_ProviderLyrics', 'Player_TransformedLyrics', 'Player_LrclibLyrics']
+		for (const cacheName of cacheNames) {
+			const cache = await caches.open(cacheName)
+			await cache.delete(`/${songId}`)
+		}
+	} catch (e) {
+		console.warn('[Beautiful Lyrics] Failed to clear cache:', e)
+	}
+	
+	console.log(`[Beautiful Lyrics] Refreshing lyrics for ${songId}`)
+	
+	// Reload lyrics
+	LoadSongLyrics()
 }
 
 // Wait for Spotify to be ready

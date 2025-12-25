@@ -9,7 +9,7 @@ import {
 	Spotify,
 	SpotifyHistory
 } from "@Spices/Spicetify/Services/Session.ts"
-import { SongLyrics } from "@Spices/Spicetify/Services/Player/mod.ts"
+import { SongLyrics, RefreshCurrentLyrics } from "@Spices/Spicetify/Services/Player/mod.ts"
 
 // Our Modules
 import LyricsRenderer from "../../Modules/LyricsRenderer.ts"
@@ -45,6 +45,9 @@ const RomanizationIcons = {
 const ExpandedControls = `
 	<div class="Controls">
 		<button id="Romanize" class="ViewControl"></button>
+		<button id="Refresh" class="ViewControl">
+			<svg role="img" height="16" width="16" aria-hidden="true" viewBox="0 0 16 16" data-encore-id="icon" class="Svg-sc-ytk21e-0 Svg-img-16-icon"><path d="M0 4.75A3.75 3.75 0 0 1 3.75 1h8.5A3.75 3.75 0 0 1 16 4.75v5a3.75 3.75 0 0 1-3.75 3.75H9.81l1.018 1.018a.75.75 0 1 1-1.06 1.06L6.939 12.75l2.829-2.828a.75.75 0 1 1 1.06 1.06L9.811 12h2.439a2.25 2.25 0 0 0 2.25-2.25v-5a2.25 2.25 0 0 0-2.25-2.25h-8.5A2.25 2.25 0 0 0 1.5 4.75v5A2.25 2.25 0 0 0 3.75 12H5v1.5H3.75A3.75 3.75 0 0 1 0 9.75v-5z"></path></svg>
+		</button>
 		<button id="Page" class="ViewControl">
 			<svg role="img" height="16" width="16" aria-hidden="true" viewBox="0 0 16 16" data-encore-id="icon" class="Svg-sc-ytk21e-0 Svg-img-16-icon"><path d="M14.55 1c.8 0 1.45.65 1.45 1.45V7h-1.5V2.5h-13v11h5.507V15H1.45C.65 15 0 14.35 0 13.55V2.45C0 1.65.65 1 1.45 1h13.1z"></path><path d="M16 9.757a.75.75 0 0 0-.75-.75H9.068L6.56 6.5h1.385a.75.75 0 1 0 0-1.5H4v3.946a.75.75 0 0 0 1.5 0V7.561l3.076 3.075v3.614c0 .414.336.75.75.75h5.925a.75.75 0 0 0 .75-.75V9.757z"></path>
 			</svg>
@@ -68,8 +71,7 @@ export default class CardView implements Giveable {
 	private readonly ShowLyricsButton: HTMLButtonElement
 	private readonly ExpandedControls: {
 		Container: HTMLDivElement;
-		RomanizeButton: HTMLButtonElement;
-		OpenPageButton: HTMLButtonElement;
+		RomanizeButton: HTMLButtonElement;		RefreshButton: HTMLButtonElement;		OpenPageButton: HTMLButtonElement;
 		CloseButton: HTMLButtonElement;
 	}
 	// deno-lint-ignore no-explicit-any
@@ -95,6 +97,7 @@ export default class CardView implements Giveable {
 			this.ExpandedControls = {
 				Container: expandedControlsContainer,
 				RomanizeButton: expandedControlsContainer.querySelector<HTMLButtonElement>("#Romanize")!,
+				RefreshButton: expandedControlsContainer.querySelector<HTMLButtonElement>("#Refresh")!,
 				OpenPageButton: expandedControlsContainer.querySelector<HTMLButtonElement>("#Page")!,
 				CloseButton: expandedControlsContainer.querySelector<HTMLButtonElement>("#Close")!,
 			}
@@ -121,6 +124,15 @@ export default class CardView implements Giveable {
 				}
 			)
 			this.Maid.Give(() => closeTooltip.destroy())
+			
+			const refreshTooltip = Spotify.Tippy(
+				this.ExpandedControls.RefreshButton,
+				{
+					...Spotify.TippyProps,
+					content: "Refresh Lyrics"
+				}
+			)
+			this.Maid.Give(() => refreshTooltip.destroy())
 			
 			const pageTooltip = Spotify.Tippy(
 				this.ExpandedControls.OpenPageButton,
@@ -184,6 +196,12 @@ export default class CardView implements Giveable {
 			this.ExpandedControls.CloseButton.addEventListener(
 				"click",
 				() => this.SetLyricsVisibility(false)
+			)
+
+			// Handle our refresh button
+			this.ExpandedControls.RefreshButton.addEventListener(
+				"click",
+				() => RefreshCurrentLyrics()
 			)
 
 			// Handle our open page button

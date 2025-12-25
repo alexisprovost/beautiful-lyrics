@@ -34,4 +34,38 @@ Never worry about Updating ever! **Beautiful Lyrics is ALWAYS Up-to-Date because
 ## Need help? Check the Wiki!
 [![GitHub Wiki Link](https://img.shields.io/badge/wiki-documentation-forestgreen)](https://github.com/surfbryce/beautiful-lyrics/wiki)
 
+## Building from Source
+
+### Prerequisites
+- [Deno](https://deno.land/) (v1.40+)
+- [Spicetify](https://spicetify.app/) installed and configured
+
+### Build & Install (Development)
+```bash
+cd Extension
+deno task store-locally
+```
+This builds the extension and copies it directly to your Spicetify extensions folder. Restart Spotify to apply.
+
+### Build Only (For Manual Installation)
+```bash
+cd Extension
+deno task release
+```
+This creates `Extension/Builds/Release/beautiful-lyrics.mjs`.
+
+### Manual Installation on Another Computer
+1. Copy `beautiful-lyrics.mjs` to your Spicetify extensions folder:
+   - **Windows:** `%APPDATA%\spicetify\Extensions\`
+   - **macOS:** `~/.config/spicetify/Extensions/`
+   - **Linux:** `~/.config/spicetify/Extensions/`
+
+2. Enable the extension:
+   ```bash
+   spicetify config extensions beautiful-lyrics.mjs
+   spicetify apply
+   ```
+
+3. Restart Spotify
+
 ## Have an Issue/Idea? Join the Discord and send them there!

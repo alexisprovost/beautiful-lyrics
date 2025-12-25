@@ -9,6 +9,10 @@
 	overflow: auto;
 
 	// container-type: size;
+
+	// Allow shadow to render on left side
+	padding-left: 16px;
+	margin-left: -16px;
 }
 
 /* Scrollbar */
@@ -51,7 +55,7 @@
 	--minimum-lyrics-size: 1.85rem;
 
 	will-change: transform;
-	contain: layout paint;
+	contain: layout;
 }
 
 /* Group */
@@ -77,7 +81,7 @@
 	margin-bottom: 1cqw;
 
 	will-change: transform;
-	contain: layout paint;
+	contain: layout;
 }
 
 .VocalsGroup:is(button) {
@@ -161,7 +165,7 @@
 			var(--maximum-lyrics-size));
 
 	will-change: transform, opacity;
-	contain: layout paint;
+	contain: layout;
 }
 
 .Lyrics .Vocals {
