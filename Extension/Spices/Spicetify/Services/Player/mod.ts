@@ -353,7 +353,7 @@ const LrclibSettingsStore = GetInstantStore<{ Enabled: boolean }>(
 
 // LRCLIB Lyrics Cache (separate from main API cache)
 const LrclibLyricsCache = GetExpireStore<ProviderLyrics | false>(
-	"Player_LrclibLyrics", 1,
+	"Player_LrclibLyrics", 2,
 	{
 		Duration: 1,
 		Unit: "Months"
@@ -437,73 +437,92 @@ const ParseLrclibPlainLyrics = (plainLyrics: string): ProviderLyrics | undefined
 	}
 }
 
+// Helper for fuzzy matching
+const LevenshteinDistance = (s1: string, s2: string): number => {
+	const len1 = s1.length
+	const len2 = s2.length
+	const matrix: number[][] = []
+
+	for (let i = 0; i <= len1; i++) matrix[i] = [i]
+	for (let j = 0; j <= len2; j++) matrix[0][j] = j
+
+	for (let i = 1; i <= len1; i++) {
+		for (let j = 1; j <= len2; j++) {
+			const cost = s1[i - 1] === s2[j - 1] ? 0 : 1
+			matrix[i][j] = Math.min(
+				matrix[i - 1][j] + 1,
+				matrix[i][j - 1] + 1,
+				matrix[i - 1][j - 1] + cost
+			)
+		}
+	}
+	return matrix[len1][len2]
+}
+
+const CalculateSimilarity = (s1: string, s2: string): number => {
+	const longer = s1.length > s2.length ? s1 : s2
+	const shorter = s1.length > s2.length ? s2 : s1
+	if (longer.length === 0) return 1.0
+	return (longer.length - LevenshteinDistance(longer, shorter)) / longer.length
+}
+
+const NormalizeString = (s: string): string => {
+	return s.toLowerCase()
+		.replace(/\(feat\..*?\)/g, "") // Remove (feat. x)
+		.replace(/\[feat\..*?\]/g, "") // Remove [feat. x]
+		.replace(/\(ft\..*?\)/g, "")   // Remove (ft. x)
+		.replace(/\[ft\..*?\]/g, "")   // Remove [ft. x]
+		.replace(/\s-\s.*remaster.*/g, "") // Remove - Remastered
+		.replace(/[^a-z0-9]/g, "")     // Remove special chars
+}
+
+const CalculateArtistMatch = (a1: string, a2: string): number => {
+	// 1. Try direct fuzzy match first
+	const directSim = CalculateSimilarity(NormalizeString(a1), NormalizeString(a2))
+	if (directSim > 0.8) return directSim
+
+	// 2. Tokenize and check for intersection
+	// Split by common separators: , & x feat. ft.
+	const splitRegex = /[,&]| x | feat\. | ft\. /i
+	const tokens1 = a1.split(splitRegex).map(NormalizeString).filter(s => s.length > 0)
+	const tokens2 = a2.split(splitRegex).map(NormalizeString).filter(s => s.length > 0)
+
+	if (tokens1.length === 0 || tokens2.length === 0) return 0
+
+	// Check if any token from a1 matches any token from a2
+	let maxTokenSim = 0
+	for (const t1 of tokens1) {
+		for (const t2 of tokens2) {
+			const sim = CalculateSimilarity(t1, t2)
+			if (sim > maxTokenSim) maxTokenSim = sim
+		}
+	}
+
+	return Math.max(directSim, maxTokenSim)
+}
+
 const FetchLrclibLyrics = async (
 	trackName: string, artistName: string, albumName: string, duration: number
 ): Promise<ProviderLyrics | undefined> => {
-	// Normalize function for comparing names (remove special chars, lowercase)
-	const normalizeStrict = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '')
-	const normalizedSearchArtist = normalizeStrict(artistName)
-	const normalizedSearchTrack = normalizeStrict(trackName)
-
-	// Score results for best match
-	const scoreResults = (results: LrclibResponse[]) => {
-		const scored = results.map(r => {
-			const normalizedResultArtist = normalizeStrict(r.artistName)
-			const normalizedResultTrack = normalizeStrict(r.trackName)
-			
-			let score = 0
-			
-			// Artist match scoring
-			if (normalizedResultArtist === normalizedSearchArtist) {
-				score += 100 // Exact match
-			} else if (normalizedResultArtist.includes(normalizedSearchArtist) || normalizedSearchArtist.includes(normalizedResultArtist)) {
-				score += 50 // Partial match
-			}
-			
-			// Track name match scoring
-			if (normalizedResultTrack === normalizedSearchTrack) {
-				score += 100 // Exact match
-			} else if (normalizedResultTrack.includes(normalizedSearchTrack) || normalizedSearchTrack.includes(normalizedResultTrack)) {
-				score += 50 // Partial match
-			}
-			
-			// Duration match scoring (within 5 seconds = good)
-			const durationDiff = Math.abs(r.duration - duration)
-			if (durationDiff <= 2) {
-				score += 30
-			} else if (durationDiff <= 5) {
-				score += 20
-			} else if (durationDiff <= 10) {
-				score += 10
-			}
-			
-			// Synced lyrics bonus
-			if (r.syncedLyrics) {
-				score += 25
-			}
-			
-			return { result: r, score }
-		})
-
-		// Filter to only include results with reasonable match (at least track matched somewhat)
-		return scored.filter(s => s.score >= 50).sort((a, b) => b.score - a.score)
-	}
-
+	const allResults = new Map<number, LrclibResponse>()
+	
 	// Try different search strategies
 	const searchStrategies = [
-		// Strategy 1: Full search with track + artist
+		// Strategy 1: Full search with track + artist + album
+		{ track_name: trackName, artist_name: artistName, album_name: albumName },
+		// Strategy 2: Full search with track + artist
 		{ track_name: trackName, artist_name: artistName },
-		// Strategy 2: Track + album only (for artists with special chars)
+		// Strategy 3: Track + album only (for artists with special chars)
 		{ track_name: trackName, album_name: albumName },
-		// Strategy 3: Track name only
+		// Strategy 4: Track name only
 		{ track_name: trackName },
-		// Strategy 4: Track + artist with q parameter (broader search)
+		// Strategy 5: Track + artist with q parameter (broader search)
 		{ q: `${trackName} ${artistName}` }
 	]
 
+	// Execute all search strategies
 	for (const params of searchStrategies) {
 		const searchParams = new URLSearchParams(params as Record<string, string>)
-		const strategyDesc = Object.entries(params).map(([k, v]) => `${k}="${v}"`).join(', ')
 		
 		try {
 			const response = await fetch(`https://lrclib.net/api/search?${searchParams.toString()}`, {
@@ -513,43 +532,81 @@ const FetchLrclibLyrics = async (
 				}
 			})
 
-			if (!response.ok) {
-				continue
-			}
+			if (!response.ok) continue
 
 			const results = await response.json() as LrclibResponse[]
-			if (!results || results.length === 0) {
-				continue
+			for (const result of results) {
+				if (!allResults.has(result.id)) {
+					allResults.set(result.id, result)
+				}
 			}
-
-			const validMatches = scoreResults(results)
-			if (validMatches.length === 0) {
-				continue
-			}
-
-			const best = validMatches[0].result
-			console.log(`[Beautiful Lyrics] LRCLIB search (${strategyDesc}) found ${results.length} results, ${validMatches.length} valid, selected: "${best.trackName}" by ${best.artistName} (${best.syncedLyrics ? 'Synced' : 'Plain'}, score: ${validMatches[0].score})`)
-
-			// Prefer synced lyrics over plain lyrics
-			if (best.syncedLyrics) {
-				return ParseLrclibSyncedLyrics(best.syncedLyrics)
-			} else if (best.plainLyrics) {
-				return ParseLrclibPlainLyrics(best.plainLyrics)
-			}
-		} catch {
-			continue
+		} catch (e) {
+			console.warn("[Beautiful Lyrics] LRCLIB search failed:", e)
 		}
 	}
 
-	console.log(`[Beautiful Lyrics] LRCLIB: No lyrics found after trying all search strategies`)
+	if (allResults.size === 0) {
+		console.log(`[Beautiful Lyrics] LRCLIB: No results found`)
+		return undefined
+	}
+
+	// Score results
+	const scoredResults = Array.from(allResults.values()).map(result => {
+		const trackSimilarity = CalculateSimilarity(NormalizeString(trackName), NormalizeString(result.trackName))
+		const artistSimilarity = CalculateArtistMatch(artistName, result.artistName)
+		const albumSimilarity = CalculateSimilarity(NormalizeString(albumName), NormalizeString(result.albumName))
+		
+		const durationDiff = Math.abs(result.duration - duration)
+		const durationScore = (durationDiff <= 2) ? 1.0 : (durationDiff <= 5) ? 0.8 : (durationDiff <= 10) ? 0.5 : 0.0
+
+		// Weighted score
+		// Track name is most important
+		// Artist name is second
+		// Duration is a sanity check
+		// Album is a bonus
+		
+		let score = (trackSimilarity * 4) + (artistSimilarity * 3) + (durationScore * 2) + (albumSimilarity * 1)
+		
+		// Bonus for synced lyrics
+		if (result.syncedLyrics) score += 0.5
+
+		return { result, score, trackSimilarity, artistSimilarity, durationDiff, albumSimilarity }
+	})
+
+	// Sort by score descending
+	scoredResults.sort((a, b) => b.score - a.score)
+
+	const bestMatch = scoredResults[0]
+	
+	// Thresholds
+	// Must have decent track and artist match
+	// Or perfect track match and okay artist match
+	const isMatch = (
+		(bestMatch.trackSimilarity > 0.8 && bestMatch.artistSimilarity > 0.7) ||
+		(bestMatch.trackSimilarity > 0.9 && bestMatch.artistSimilarity > 0.5) || 
+		// Allow lower artist match if album matches well (e.g. Various Artists vs specific artist)
+		(bestMatch.trackSimilarity > 0.9 && bestMatch.albumSimilarity > 0.8)
+	) && (bestMatch.durationDiff < 15) // Hard limit on duration difference
+
+	if (isMatch) {
+		console.log(`[Beautiful Lyrics] LRCLIB: Selected "${bestMatch.result.trackName}" by ${bestMatch.result.artistName} (Score: ${bestMatch.score.toFixed(2)})`)
+		if (bestMatch.result.syncedLyrics) {
+			return ParseLrclibSyncedLyrics(bestMatch.result.syncedLyrics)
+		} else if (bestMatch.result.plainLyrics) {
+			return ParseLrclibPlainLyrics(bestMatch.result.plainLyrics)
+		}
+	}
+
+	console.log(`[Beautiful Lyrics] LRCLIB: No good match found. Best was "${bestMatch.result.trackName}" by ${bestMatch.result.artistName} (Score: ${bestMatch.score.toFixed(2)}, TrackSim: ${bestMatch.trackSimilarity.toFixed(2)}, ArtistSim: ${bestMatch.artistSimilarity.toFixed(2)})`)
 	return undefined
 }
 
 export let SongLyrics: (TransformedLyrics | undefined) = undefined
 export let HaveSongLyricsLoaded: boolean = false
-const LoadSongLyrics = () => {
+const LoadSongLyrics = (forceRefresh: boolean = false) => {
 	// Remove our prior lyric state
 	HaveSongLyricsLoaded = false, SongLyrics = undefined
+	SongLyricsLoadedSignal.Fire()
 
 	// Check if we can even possibly have lyrics
 	const songAtUpdate = Song
@@ -562,7 +619,7 @@ const LoadSongLyrics = () => {
 	// Now go through the process of loading our lyrics
 	{
 		// First determine if we have our lyrics stored already
-		ProviderLyricsStore.GetItem(songAtUpdate.Id)
+		((forceRefresh) ? Promise.resolve(undefined) : ProviderLyricsStore.GetItem(songAtUpdate.Id))
 		.then(
 			providerLyrics => {
 				if (providerLyrics === undefined) { // Otherwise, get our lyrics
@@ -625,7 +682,7 @@ const LoadSongLyrics = () => {
 		.then(
 			(storedProviderLyrics): Promise<[(ProviderLyrics | false), (TransformedLyrics | false | undefined)]> => {
 				return (
-					TransformedLyricsStore.GetItem(songAtUpdate.Id)
+					((forceRefresh) ? Promise.resolve(undefined) : TransformedLyricsStore.GetItem(songAtUpdate.Id))
 					.then(storedTransformedLyrics => [storedProviderLyrics, storedTransformedLyrics])
 				)
 			}
@@ -660,7 +717,7 @@ const LoadSongLyrics = () => {
 					const duration = songAtUpdate.Duration
 
 					// Check LRCLIB cache first
-					return LrclibLyricsCache.GetItem(songAtUpdate.Id)
+					return ((forceRefresh) ? Promise.resolve(undefined) : LrclibLyricsCache.GetItem(songAtUpdate.Id))
 						.then(cachedLrclibLyrics => {
 							// If we have cached LRCLIB result, use it (false means we checked and found nothing useful)
 							if (cachedLrclibLyrics !== undefined) {
@@ -679,7 +736,7 @@ const LoadSongLyrics = () => {
 									const shouldUseLrclib = lrclibLyrics && (
 										storedProviderLyrics === false
 										|| (currentLyricsType === "Static" && lrclibType !== "Static")
-										|| (currentLyricsType === "Line" && lrclibType === "Syllable")
+										|| (currentLyricsType === "Line" && lrclibType !== "Static")
 									)
 									
 									if (shouldUseLrclib && lrclibLyrics) {
@@ -771,22 +828,11 @@ export const RefreshCurrentLyrics = async (): Promise<void> => {
 		return
 	}
 	
-	// Clear all caches for this song by deleting the cache entries
 	const songId = currentSong.Id
-	try {
-		const cacheNames = ['Player_ProviderLyrics', 'Player_TransformedLyrics', 'Player_LrclibLyrics']
-		for (const cacheName of cacheNames) {
-			const cache = await caches.open(cacheName)
-			await cache.delete(`/${songId}`)
-		}
-	} catch (e) {
-		console.warn('[Beautiful Lyrics] Failed to clear cache:', e)
-	}
-	
 	console.log(`[Beautiful Lyrics] Refreshing lyrics for ${songId}`)
 	
-	// Reload lyrics
-	LoadSongLyrics()
+	// Reload lyrics with force refresh
+	LoadSongLyrics(true)
 }
 
 // Wait for Spotify to be ready

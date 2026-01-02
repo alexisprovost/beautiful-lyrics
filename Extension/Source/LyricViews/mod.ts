@@ -207,6 +207,24 @@ OnSpotifyReady
 					const refreshBtn = card.querySelector<HTMLButtonElement>(".RefreshLyrics")
 					if (refreshBtn) {
 						refreshBtn.addEventListener("click", () => {
+							refreshBtn.disabled = true
+							refreshBtn.style.opacity = "0.5"
+							refreshBtn.style.cursor = "not-allowed"
+							refreshBtn.innerHTML = `
+								<svg role="img" height="16" width="16" aria-hidden="true" viewBox="0 0 16 16" style="animation: spin 1s linear infinite;">
+									<path d="M0 4.75A3.75 3.75 0 0 1 3.75 1h8.5A3.75 3.75 0 0 1 16 4.75v5a3.75 3.75 0 0 1-3.75 3.75H9.81l1.018 1.018a.75.75 0 1 1-1.06 1.06L6.939 12.75l2.829-2.828a.75.75 0 1 1 1.06 1.06L9.811 12h2.439a2.25 2.25 0 0 0 2.25-2.25v-5a2.25 2.25 0 0 0-2.25-2.25h-8.5A2.25 2.25 0 0 0 1.5 4.75v5A2.25 2.25 0 0 0 3.75 12H5v1.5H3.75A3.75 3.75 0 0 1 0 9.75v-5z"></path>
+								</svg>
+								Retrying...
+							`
+							
+							// Add keyframes for spin if not present
+							if (!document.getElementById('beautiful-lyrics-spin-style')) {
+								const style = document.createElement('style')
+								style.id = 'beautiful-lyrics-spin-style'
+								style.textContent = `@keyframes spin { 100% { transform: rotate(360deg); } }`
+								document.head.appendChild(style)
+							}
+							
 							RefreshCurrentLyrics()
 						})
 					}
@@ -355,6 +373,20 @@ OnSpotifyReady
 			if (controlsContainer === null) {
 				ViewMaid.Give(Defer(SearchDOM))
 			} else {
+				const observer = new MutationObserver(() => {
+					for (const element of controlsContainer.children) {
+						if (
+							(element.attributes.getNamedItem("data-testid")?.value === "fullscreen-mode-button")
+							&& (element.id !== "BeautifulLyricsFullscreenButton")
+						) {
+							(element as HTMLElement).style.display = "none"
+						}
+					}
+				})
+				observer.observe(controlsContainer, { childList: true, subtree: true })
+				ViewMaid.Give(() => observer.disconnect())
+
+				// Initial check
 				for (const element of controlsContainer.children) {
 					if (
 						(element.attributes.getNamedItem("data-testid")?.value === "fullscreen-mode-button")
