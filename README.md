@@ -1,3 +1,7 @@
+# About the fork
+This fork changes the lyrics font to rubiko-sans and increases the lyrics card's height.
+
+
 # Beautiful Lyrics
 🌟 Starring the project helps this extension get seen by more people - which means more Beautiful Lyrics! 
 
