@@ -1,6 +1,6 @@
 .LoadingLyricsCard {
 	display: flex;
-	height: 340px;
+	height: 1340px;
 	background-color: var(--background-tinted-base) !important;
 	border-radius: 8px !important;
 	opacity: 0.35;
@@ -8,7 +8,7 @@
 
 #BeautifulLyrics-CardView {
 	display: flex;
-	max-height: 340px;
+	max-height: 1340px;
 	background-color: var(--background-tinted-base) !important;
 	border-radius: 8px;
 	padding: 16px;
@@ -139,7 +139,7 @@
 		.ContentContainer {
 			display: block;
 			width: 100cqw;
-			height: 20cqh;
+			height: 60cqh;
 			container-type: size;
 
 			z-index: 100;
